@@ -1,0 +1,2 @@
+# Intentionally empty. QIP v2.0 reference implementation is stdlib-only (Python 3.9+).
+# The governance layer must not drag a framework with it.
