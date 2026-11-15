@@ -1,6 +1,7 @@
 """Qdrant + embedding store. Fail-closed ingest contract enforcement (ops/ingest-contract.md)."""
 import datetime
 import json
+import math
 import urllib.error
 import urllib.request
 import uuid
@@ -113,10 +114,10 @@ def capture(collection, *, topic, type_, tier, full_text, project=None, source=N
     return pid
 
 
-def scroll(collection, flt=None, limit=200, with_payload=True):
+def scroll(collection, flt=None, limit=200, with_payload=True, with_vector=False):
     pts, offset = [], None
     while True:
-        body = {"limit": min(limit - len(pts), 200), "with_payload": with_payload, "with_vector": False}
+        body = {"limit": min(limit - len(pts), 200), "with_payload": with_payload, "with_vector": with_vector}
         if flt:
             body["filter"] = flt
         if offset:
@@ -160,7 +161,7 @@ def ensure_setup():
                        {"field_name": field, "field_schema": "keyword"})
                 print(f"[init] index {name}.{field} ok")
             except RuntimeError as e:
-                if "already exists" in str(e).lower() or "400" in str(e):
+                if "already exists" in str(e).lower():
                     print(f"[init] index {name}.{field} exists")
                 else:
                     raise
@@ -168,20 +169,28 @@ def ensure_setup():
 
 def audit(collection="qip_knowledge", strict=False):
     """Vector-integrity audit; the fail-closed gate. Returns True on pass."""
-    pts = scroll(collection, limit=100000)
-    bad_model, bad_status, missing_full = [], [], []
+    pts = scroll(collection, limit=100000, with_vector=True)
+    bad_model, bad_status, missing_full, bad_vector = [], [], [], []
     for p in pts:
         pl = p["payload"]
         if pl.get("embedding_model") != config.CANONICAL_MODEL:
             bad_model.append(p["id"])
         if pl.get("embedding_status") != "embedded":
             bad_status.append(p["id"])
+        vector = p.get("vector")
+        if (not isinstance(vector, list) or len(vector) != config.VECTOR_SIZE
+                or not all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                           and math.isfinite(v) for v in vector)
+                or not any(v != 0 for v in vector)):
+            bad_vector.append(p["id"])
         if strict and not (pl.get("full_text") or pl.get("content")):
             missing_full.append(p["id"])
     print(f"[audit] {collection}: {len(pts)} points | canonical model: "
-          f"{len(pts) - len(bad_model)}/{len(pts)} | embedded: {len(pts) - len(bad_status)}/{len(pts)}")
+          f"{len(pts) - len(bad_model)}/{len(pts)} | embedded: {len(pts) - len(bad_status)}/{len(pts)} | "
+          f"valid vectors: {len(pts) - len(bad_vector)}/{len(pts)}")
     if strict:
         print(f"[audit:strict] missing full_text: {len(missing_full)} (remediation backlog, see MAP.md)")
-    ok = not bad_model and not bad_status
-    print("[audit] PASS" if ok else f"[audit] FAIL model={bad_model[:5]} status={bad_status[:5]}")
+    ok = not bad_model and not bad_status and not bad_vector
+    print("[audit] PASS" if ok else
+          f"[audit] FAIL model={bad_model[:5]} status={bad_status[:5]} vector={bad_vector[:5]}")
     return ok
